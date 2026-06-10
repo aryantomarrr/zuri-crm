@@ -1,0 +1,86 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Customer {
+  id          String    @id @default(cuid())
+  name        String
+  email       String    @unique
+  phone       String
+  city        String
+  gender      String
+  totalSpend  Float     @default(0)
+  orderCount  Int       @default(0)
+  lastOrderAt DateTime?
+  createdAt   DateTime  @default(now())
+
+  orders          Order[]
+  campaignMembers CampaignMember[]
+}
+
+model Order {
+  id          String   @id @default(cuid())
+  customerId  String
+  amount      Float
+  productName String
+  category    String
+  createdAt   DateTime @default(now())
+
+  customer Customer @relation(fields: [customerId], references: [id])
+}
+
+model Segment {
+  id          String   @id @default(cuid())
+  name        String
+  description String
+  nlQuery     String
+  sqlWhere    String
+  memberCount Int      @default(0)
+  createdBy   String   @default("ai")
+  createdAt   DateTime @default(now())
+
+  campaigns Campaign[]
+}
+
+model Campaign {
+  id          String    @id @default(cuid())
+  name        String
+  goalText    String
+  segmentId   String
+  channel     String
+  status      String    @default("draft")
+  aiReasoning String?
+  createdAt   DateTime  @default(now())
+  launchedAt  DateTime?
+
+  segment Segment          @relation(fields: [segmentId], references: [id])
+  members CampaignMember[]
+}
+
+model CampaignMember {
+  id                  String @id @default(cuid())
+  campaignId          String
+  customerId          String
+  personalizedMessage String
+  status              String @default("pending")
+
+  campaign Campaign    @relation(fields: [campaignId], references: [id])
+  customer Customer    @relation(fields: [customerId], references: [id])
+  events   CommEvent[]
+}
+
+model CommEvent {
+  id               String   @id @default(cuid())
+  campaignMemberId String
+  eventType        String
+  receivedAt       DateTime @default(now())
+
+  campaignMember CampaignMember @relation(fields: [campaignMemberId], references: [id])
+
+  @@unique([campaignMemberId, eventType])
+}
