@@ -62,6 +62,7 @@ export async function GET(req: NextRequest, context: any) {
         channel: campaign.channel,
         status: campaign.status,
         aiReasoning: campaign.aiReasoning,
+        aiInsight: (campaign as any).aiInsight || null,
         launchedAt: campaign.launchedAt,
         memberCount: campaign.members.length,
       },
@@ -74,7 +75,6 @@ export async function GET(req: NextRequest, context: any) {
         failed: count('failed'),
       },
       members,
-      insight: null,
     })
   } catch (error: any) {
     return Response.json({ error: error.message }, { status: 500 })

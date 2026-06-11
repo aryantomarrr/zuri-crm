@@ -55,6 +55,7 @@ model Campaign {
   channel     String
   status      String    @default("draft")
   aiReasoning String?
+  aiInsight   String?
   createdAt   DateTime  @default(now())
   launchedAt  DateTime?
 

@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useRef } from 'react'
 import { useParams, useRouter } from 'next/navigation'
 import { BarChart3, Users, MessageSquare, MousePointer, ShoppingBag, XCircle, Zap, ArrowLeft, TrendingUp } from 'lucide-react'
 
@@ -27,6 +27,12 @@ interface FollowUpOption {
   color: string
 }
 
+interface InsightCard {
+  metric: string
+  status: 'good' | 'warning' | 'bad'
+  suggestion: string
+}
+
 interface Stats {
   campaign: {
     id: string
@@ -35,6 +41,7 @@ interface Stats {
     channel: string
     status: string
     aiReasoning: string
+    aiInsight: string | null
     launchedAt: string | null
     memberCount: number
   }
@@ -55,10 +62,11 @@ export default function CampaignPage() {
   const [stats, setStats] = useState<Stats | null>(null)
   const [launching, setLaunching] = useState(false)
   const [launched, setLaunched] = useState(false)
-  const [insight, setInsight] = useState<string | null>(null)
+  const [insightCards, setInsightCards] = useState<InsightCard[]>([])
   const [followUpOptions, setFollowUpOptions] = useState<FollowUpOption[]>([])
   const [activeTab, setActiveTab] = useState<'all' | 'clicked' | 'read' | 'delivered' | 'failed'>('all')
   const [launchingFollowUp, setLaunchingFollowUp] = useState<string | null>(null)
+  const sseStarted = useRef(false)
 
   useEffect(() => {
     fetchStats()
@@ -71,7 +79,15 @@ export default function CampaignPage() {
       setStats(data)
       if (data.campaign.status === 'launched') {
         setLaunched(true)
-        startSSE()
+        // Load saved insight cards from DB — no AI call needed
+        if (data.campaign.aiInsight) {
+          try {
+            const cards = JSON.parse(data.campaign.aiInsight)
+            setInsightCards(cards)
+          } catch (_) {}
+        } else {
+          startSSE()
+        }
       }
     } catch (e) {
       console.error(e)
@@ -79,6 +95,9 @@ export default function CampaignPage() {
   }
 
   function startSSE() {
+    if (sseStarted.current) return
+    sseStarted.current = true
+
     const es = new EventSource(`/api/campaigns/${id}/live`)
 
     const memberPollInterval = setInterval(async () => {
@@ -97,8 +116,8 @@ export default function CampaignPage() {
         if (data.type === 'stats') {
           setStats(prev => prev ? { ...prev, events: data.events } : prev)
         }
-        if (data.type === 'insight') {
-          setInsight(data.insight)
+        if (data.type === 'insight_cards') {
+          setInsightCards(data.cards)
         }
         if (data.type === 'followup_options') {
           setFollowUpOptions(data.options)
@@ -289,15 +308,9 @@ export default function CampaignPage() {
               </div>
             </div>
 
-            {/* AI Insight */}
-            {insight && (
-              <div className="bg-gradient-to-br from-violet-500/10 to-purple-500/5 border border-violet-500/20 rounded-2xl p-5">
-                <div className="flex items-center gap-2 text-violet-400 text-xs font-medium uppercase tracking-wider mb-3">
-                  <TrendingUp className="w-3.5 h-3.5" />
-                  AI Campaign Insight
-                </div>
-                <p className="text-gray-200 text-sm leading-relaxed">{insight}</p>
-              </div>
+            {/* AI Insight Cards Carousel */}
+            {insightCards.length > 0 && (
+              <InsightCarousel cards={insightCards} />
             )}
 
             {/* Follow-up options */}
@@ -409,6 +422,74 @@ export default function CampaignPage() {
     </div>
   )
 }
+
+
+function InsightCarousel({ cards }: { cards: any[] }) {
+  const [current, setCurrent] = useState(0)
+
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setCurrent(prev => (prev + 1) % cards.length)
+    }, 4000)
+    return () => clearInterval(timer)
+  }, [cards.length])
+
+  const card = cards[current]
+  if (!card) return null
+
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center gap-2 text-violet-400 text-xs font-medium uppercase tracking-wider">
+        <TrendingUp className="w-3.5 h-3.5" />
+        AI Campaign Insights
+      </div>
+      <div className={`border rounded-2xl p-5 transition-all duration-500 ${
+        card.status === 'good'
+          ? 'border-green-500/20 bg-green-500/5'
+          : card.status === 'warning'
+          ? 'border-amber-500/20 bg-amber-500/5'
+          : 'border-red-500/20 bg-red-500/5'
+      }`}>
+        <div className={`font-semibold text-base mb-2 ${
+          card.status === 'good' ? 'text-green-400'
+          : card.status === 'warning' ? 'text-amber-400'
+          : 'text-red-400'
+        }`}>
+          {card.status === 'good' ? '✓' : card.status === 'warning' ? '⚠' : '✗'} {card.metric}
+        </div>
+        <div className="text-sm text-gray-300 leading-relaxed">{card.suggestion}</div>
+
+        {/* Navigation */}
+        <div className="flex items-center justify-between mt-4">
+          <button
+            onClick={() => setCurrent(prev => (prev - 1 + cards.length) % cards.length)}
+            className="text-gray-600 hover:text-white transition-colors text-lg px-2"
+          >
+            ←
+          </button>
+          <div className="flex gap-1.5">
+            {cards.map((_, i) => (
+              <button
+                key={i}
+                onClick={() => setCurrent(i)}
+                className={`w-1.5 h-1.5 rounded-full transition-all ${
+                  i === current ? 'bg-white w-4' : 'bg-gray-700'
+                }`}
+              />
+            ))}
+          </div>
+          <button
+            onClick={() => setCurrent(prev => (prev + 1) % cards.length)}
+            className="text-gray-600 hover:text-white transition-colors text-lg px-2"
+          >
+            →
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 
 function StatCard({ icon, label, value, color, rate }: any) {
   const colors: any = {
