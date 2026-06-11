@@ -1,25 +1,13 @@
-import OpenAI from 'openai'
+import Anthropic from '@anthropic-ai/sdk'
 import { NextRequest } from 'next/server'
 import { SYSTEM_PROMPT } from '@/lib/agent/system-prompt'
 import { tools } from '@/lib/agent/tools'
 import { handleToolCall } from '@/lib/agent/handlers'
 
-const client = new OpenAI({
-  baseURL: 'https://openrouter.ai/api/v1',
-  apiKey: process.env.OPENROUTER_API_KEY!,
-})
-
-const openRouterTools = tools.map(t => ({
-  type: 'function' as const,
-  function: {
-    name: t.name,
-    description: t.description,
-    parameters: t.input_schema,
-  },
-}))
+const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY! })
 
 export async function POST(req: NextRequest) {
-  const { messages } = await req.json()
+  const { messages, segmentId, channel, goalText } = await req.json()
   const encoder = new TextEncoder()
 
   const stream = new ReadableStream({
@@ -29,69 +17,169 @@ export async function POST(req: NextRequest) {
       }
 
       try {
-        let currentMessages: any[] = [
-          { role: 'system', content: SYSTEM_PROMPT },
-          ...messages.map((m: any) => ({
-            role: m.role,
-            content: m.content || '...',
-          })),
-        ]
+        const userMessage = messages[messages.length - 1]
+        const lastUserContent = (userMessage?.content || '').trim()
+
+        const isApproval = /^(yes|launch|go|proceed|confirm|ok|sure|do it|launch it|yes launch|yes please|launch campaign|approved|y)$/i.test(lastUserContent)
+
+        const historyStr = JSON.stringify(messages)
+        const alreadyHasCampaign = historyStr.includes('"campaign_id"')
+
+        if (alreadyHasCampaign) {
+          send({ type: 'text', text: 'Your campaign is already created! Click View Live Stats to track delivery.' })
+          send({ type: 'done' })
+          controller.close()
+          return
+        }
+
+        // Handle approval directly — no AI needed, use state from frontend
+        if (isApproval) {
+          try {
+            if (!segmentId) {
+              send({ type: 'text', text: 'Please describe your campaign goal first.' })
+              send({ type: 'done' })
+              controller.close()
+              return
+            }
+
+            const { prisma } = await import('@/lib/db/prisma')
+            const segment = await prisma.segment.findUnique({ where: { id: segmentId } })
+
+            if (!segment) {
+              send({ type: 'text', text: 'Could not find campaign data. Please try again.' })
+              send({ type: 'done' })
+              controller.close()
+              return
+            }
+
+            // Fetch customers with full data for personalization
+            const customers = await prisma.$queryRawUnsafe(
+              `SELECT id, name, city, "totalSpend", "lastOrderAt", "orderCount"
+               FROM "Customer" WHERE ${segment.sqlWhere} LIMIT 100`
+            ) as any[]
+
+            if (customers.length === 0) {
+              send({ type: 'text', text: 'No customers found in this segment. Please try a different goal.' })
+              send({ type: 'done' })
+              controller.close()
+              return
+            }
+
+            // Generate personalized messages using real purchase history
+            const messagesResult = await handleToolCall('draft_messages', {
+              campaign_goal: goalText || 'Marketing campaign',
+              channel: channel || 'WhatsApp',
+              customers: customers.map((c: any) => ({
+                id: c.id,
+                name: c.name,
+                city: c.city,
+                totalSpend: Number(c.totalSpend),
+                lastOrderAt: c.lastOrderAt,
+                orderCount: c.orderCount,
+              }))
+            })
+
+            const campaignMessages = messagesResult.messages?.length > 0
+              ? messagesResult.messages
+              : customers.map((c: any) => ({
+                  customerId: c.id,
+                  customerName: c.name,
+                  message: `Hi ${c.name.split(' ')[0]}! ${goalText} Shop at zuri.in`
+                }))
+
+            // Create the campaign
+            const result = await handleToolCall('create_campaign', {
+              name: (goalText || 'Campaign').slice(0, 60),
+              goal_text: goalText || 'Marketing campaign',
+              segment_id: segmentId,
+              channel: channel || 'WhatsApp',
+              messages: campaignMessages,
+              ai_reasoning: `${channel || 'WhatsApp'} selected for ${customers.length} customers in "${segment.name}". Messages personalized using real purchase history.`
+            })
+
+            send({ type: 'tool_result', tool: 'create_campaign', result })
+
+            if (result?.campaign_id) {
+              send({ type: 'text', text: `Campaign launched with ${campaignMessages.length} personalized messages! Click View Live Stats to track delivery in real time.` })
+            } else {
+              send({ type: 'text', text: result?.error || 'Something went wrong. Please try again.' })
+            }
+          } catch (e: any) {
+            console.error('Approval error:', e.message)
+            send({ type: 'error', message: e.message })
+          }
+          send({ type: 'done' })
+          controller.close()
+          return
+        }
+
+        // Normal flow — run all tools via agentic loop
+        let currentMessages: any[] = [{
+          role: 'user',
+          content: lastUserContent
+        }]
 
         let continueLoop = true
         let loopCount = 0
-        const MAX_LOOPS = 8
+        let campaignCreated = false
 
-        while (continueLoop && loopCount < MAX_LOOPS) {
+        while (continueLoop && loopCount < 10 && !campaignCreated) {
           loopCount++
 
-          const response = await client.chat.completions.create({
-            model: 'anthropic/claude-3-haiku',
+          const response = await anthropic.messages.create({
+            model: 'claude-haiku-4-5',
+            max_tokens: 4096,
+            system: SYSTEM_PROMPT,
+            tools: tools as any,
             messages: currentMessages,
-            tools: openRouterTools,
-            tool_choice: 'auto',
           })
 
-          const message = response.choices[0].message
-          continueLoop = false
+          const toolResults: any[] = []
+          let hasToolUse = false
 
-          if (message.content) {
-            send({ type: 'text', text: message.content })
-          }
-
-          if (message.tool_calls && message.tool_calls.length > 0) {
-            const toolResults: any[] = []
-
-            for (const toolCall of message.tool_calls) {
-              const tc = toolCall as any
-              const name = tc.function.name
-              let args: any = {}
-              try {
-                args = JSON.parse(tc.function.arguments)
-              } catch (_) {}
-
-              send({ type: 'tool_start', tool: name })
-              const result = await handleToolCall(name, args)
-              send({ type: 'tool_result', tool: name, result })
+          for (const block of response.content) {
+            if (block.type === 'text' && block.text) {
+              const clean = block.text.replace(/<\/?result>/gi, '').trim()
+              if (clean) send({ type: 'text', text: clean })
+            }
+            if (block.type === 'tool_use') {
+              hasToolUse = true
+              const toolBlock = block as any
+              send({ type: 'tool_start', tool: toolBlock.name })
+              const result = await handleToolCall(toolBlock.name, toolBlock.input)
+              send({ type: 'tool_result', tool: toolBlock.name, result })
 
               toolResults.push({
-                role: 'tool' as const,
-                tool_call_id: tc.id,
+                type: 'tool_result',
+                tool_use_id: toolBlock.id,
                 content: JSON.stringify(result),
               })
-            }
 
+              if (toolBlock.name === 'create_campaign') {
+                campaignCreated = true
+              }
+            }
+          }
+
+          if (hasToolUse && !campaignCreated) {
             currentMessages = [
               ...currentMessages,
-              message,
-              ...toolResults,
+              { role: 'assistant', content: response.content },
+              { role: 'user', content: toolResults },
             ]
             continueLoop = true
+          } else if (hasToolUse && campaignCreated) {
+            send({ type: 'text', text: 'Campaign launched! Click View Live Stats to track delivery in real time.' })
+            continueLoop = false
+          } else {
+            continueLoop = false
           }
         }
 
         send({ type: 'done' })
         controller.close()
       } catch (error: any) {
+        console.error('Agent error:', error.message)
         send({ type: 'error', message: error.message })
         controller.close()
       }

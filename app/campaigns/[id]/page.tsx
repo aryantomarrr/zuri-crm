@@ -1,8 +1,31 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { useParams } from 'next/navigation'
-import { BarChart3, Users, MessageSquare, MousePointer, ShoppingBag, XCircle, Zap } from 'lucide-react'
+import { useParams, useRouter } from 'next/navigation'
+import { BarChart3, Users, MessageSquare, MousePointer, ShoppingBag, XCircle, Zap, ArrowLeft, TrendingUp } from 'lucide-react'
+
+interface Member {
+  id: string
+  personalizedMessage: string
+  status: string
+  customer: {
+    id: string
+    name: string
+    city: string
+    totalSpend: number
+    orderCount: number
+  }
+}
+
+interface FollowUpOption {
+  type: string
+  title: string
+  description: string
+  action: string
+  customers: any[]
+  count: number
+  color: string
+}
 
 interface Stats {
   campaign: {
@@ -23,15 +46,19 @@ interface Stats {
     order_placed: number
     failed: number
   }
-  insight: string | null
+  members: Member[]
 }
 
 export default function CampaignPage() {
   const { id } = useParams()
+  const router = useRouter()
   const [stats, setStats] = useState<Stats | null>(null)
   const [launching, setLaunching] = useState(false)
   const [launched, setLaunched] = useState(false)
   const [insight, setInsight] = useState<string | null>(null)
+  const [followUpOptions, setFollowUpOptions] = useState<FollowUpOption[]>([])
+  const [activeTab, setActiveTab] = useState<'all' | 'clicked' | 'read' | 'delivered' | 'failed'>('all')
+  const [launchingFollowUp, setLaunchingFollowUp] = useState<string | null>(null)
 
   useEffect(() => {
     fetchStats()
@@ -53,6 +80,17 @@ export default function CampaignPage() {
 
   function startSSE() {
     const es = new EventSource(`/api/campaigns/${id}/live`)
+
+    const memberPollInterval = setInterval(async () => {
+      try {
+        const res = await fetch(`/api/campaigns/${id}/stats`)
+        const data = await res.json()
+        if (data.members) {
+          setStats(prev => prev ? { ...prev, members: data.members } : prev)
+        }
+      } catch (_) {}
+    }, 4000)
+
     es.onmessage = (e) => {
       try {
         const data = JSON.parse(e.data)
@@ -62,13 +100,21 @@ export default function CampaignPage() {
         if (data.type === 'insight') {
           setInsight(data.insight)
         }
+        if (data.type === 'followup_options') {
+          setFollowUpOptions(data.options)
+        }
         if (data.type === 'done') {
           es.close()
+          clearInterval(memberPollInterval)
+          fetchStats()
         }
       } catch (_) {}
     }
-    es.onerror = () => es.close()
-    return () => es.close()
+
+    es.onerror = () => {
+      es.close()
+      clearInterval(memberPollInterval)
+    }
   }
 
   async function launchCampaign() {
@@ -76,10 +122,7 @@ export default function CampaignPage() {
     try {
       await fetch(`/api/campaigns/${id}/launch`, { method: 'POST' })
       setLaunched(true)
-      setStats(prev => prev ? {
-        ...prev,
-        campaign: { ...prev.campaign, status: 'launched' }
-      } : prev)
+      setStats(prev => prev ? { ...prev, campaign: { ...prev.campaign, status: 'launched' } } : prev)
       startSSE()
     } catch (e) {
       console.error(e)
@@ -88,74 +131,122 @@ export default function CampaignPage() {
     }
   }
 
+  async function launchFollowUp(option: FollowUpOption) {
+    setLaunchingFollowUp(option.type)
+    try {
+      const res = await fetch(`/api/campaigns/${id}/retarget`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          type: option.type,
+          customers: option.customers,
+          goalText: option.action,
+          channel: stats?.campaign.channel || 'WhatsApp'
+        })
+      })
+      const data = await res.json()
+      if (data.campaign_id) {
+        router.push(`/campaigns/${data.campaign_id}`)
+      }
+    } catch (e) {
+      console.error(e)
+    } finally {
+      setLaunchingFollowUp(null)
+    }
+  }
+
   if (!stats) {
     return (
-      <div className="min-h-screen bg-gray-950 text-white flex items-center justify-center">
-        <div className="flex gap-2">
-          <div className="w-2 h-2 bg-purple-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
-          <div className="w-2 h-2 bg-purple-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
-          <div className="w-2 h-2 bg-purple-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
+      <div className="min-h-screen bg-[#0A0A0F] text-white flex items-center justify-center">
+        <div className="flex gap-1.5">
+          <div className="w-2 h-2 bg-violet-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
+          <div className="w-2 h-2 bg-violet-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
+          <div className="w-2 h-2 bg-violet-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
         </div>
       </div>
     )
   }
 
-  const { campaign, events } = stats
-  const deliveryRate = campaign.memberCount > 0
-    ? Math.round((events.delivered / campaign.memberCount) * 100)
-    : 0
-  const readRate = events.delivered > 0
-    ? Math.round((events.read / events.delivered) * 100)
-    : 0
-  const clickRate = events.read > 0
-    ? Math.round((events.clicked / events.read) * 100)
-    : 0
+  const { campaign, events, members } = stats
+
+  const filteredMembers = (members || []).filter(m => {
+    if (activeTab === 'all') return true
+    if (activeTab === 'clicked') return m.status === 'clicked' || m.status === 'converted'
+    if (activeTab === 'read') return m.status === 'read'
+    if (activeTab === 'delivered') return m.status === 'delivered'
+    if (activeTab === 'failed') return m.status === 'failed'
+    return true
+  })
+
+  const statusColor = (status: string) => {
+    switch (status) {
+      case 'converted': return 'bg-amber-500/10 text-amber-400 border-amber-500/20'
+      case 'clicked': return 'bg-green-500/10 text-green-400 border-green-500/20'
+      case 'read': return 'bg-teal-500/10 text-teal-400 border-teal-500/20'
+      case 'delivered': return 'bg-violet-500/10 text-violet-400 border-violet-500/20'
+      case 'sent': return 'bg-blue-500/10 text-blue-400 border-blue-500/20'
+      case 'failed': return 'bg-red-500/10 text-red-400 border-red-500/20'
+      default: return 'bg-gray-500/10 text-gray-400 border-gray-500/20'
+    }
+  }
+
+  const followUpColors: Record<string, string> = {
+    green: 'border-green-500/20 bg-green-500/5',
+    blue: 'border-blue-500/20 bg-blue-500/5',
+    amber: 'border-amber-500/20 bg-amber-500/5',
+  }
+
+  const followUpButtonColors: Record<string, string> = {
+    green: 'bg-green-600 hover:bg-green-500',
+    blue: 'bg-blue-600 hover:bg-blue-500',
+    amber: 'bg-amber-600 hover:bg-amber-500',
+  }
 
   return (
-    <div className="min-h-screen bg-gray-950 text-white">
-      {/* Header */}
-      <header className="border-b border-gray-800 px-6 py-4 flex items-center justify-between">
+    <div className="min-h-screen bg-[#0A0A0F] text-white">
+      <header className="border-b border-white/5 px-4 md:px-6 py-4 flex items-center justify-between backdrop-blur-sm bg-[#0A0A0F]/80 sticky top-0 z-50">
         <div className="flex items-center gap-3">
-          <a href="/" className="w-8 h-8 bg-purple-600 rounded-lg flex items-center justify-center font-bold text-sm">Z</a>
-          <span className="font-semibold text-lg">Zuri CRM</span>
-          <span className="text-xs bg-purple-900 text-purple-300 px-2 py-0.5 rounded-full">AI-powered</span>
+          <a href="/" className="w-8 h-8 rounded-lg bg-gradient-to-br from-violet-500 to-purple-700 flex items-center justify-center font-bold text-sm">Z</a>
+          <span className="font-semibold text-lg tracking-tight">Zuri CRM</span>
+          <span className="hidden sm:block text-xs bg-violet-500/10 text-violet-400 border border-violet-500/20 px-2 py-0.5 rounded-full">AI-powered</span>
         </div>
-        <nav className="flex items-center gap-6 text-sm text-gray-400">
-          <a href="/" className="hover:text-white transition-colors">Campaigns</a>
-          <a href="/customers" className="hover:text-white transition-colors">Customers</a>
-          <a href="/campaigns" className="text-white font-medium">History</a>
+        <nav className="flex items-center gap-1">
+          <a href="/" className="px-3 py-1.5 text-sm text-gray-400 hover:text-white hover:bg-white/5 rounded-lg transition-all">Campaigns</a>
+          <a href="/customers" className="px-3 py-1.5 text-sm text-gray-400 hover:text-white hover:bg-white/5 rounded-lg transition-all">Customers</a>
+          <a href="/campaigns" className="px-3 py-1.5 text-sm text-white bg-white/5 rounded-lg font-medium">History</a>
         </nav>
       </header>
 
-      <div className="max-w-4xl mx-auto p-6 space-y-6">
+      <div className="max-w-5xl mx-auto p-4 md:p-6 space-y-5">
+        <a href="/campaigns" className="inline-flex items-center gap-2 text-sm text-gray-500 hover:text-white transition-colors">
+          <ArrowLeft className="w-4 h-4" />
+          Back to campaigns
+        </a>
+
         {/* Campaign header */}
-        <div className="bg-gray-900 rounded-2xl p-6 border border-gray-800">
+        <div className="bg-white/3 border border-white/8 rounded-2xl p-5 md:p-6">
           <div className="flex items-start justify-between mb-4">
             <div>
-              <h1 className="text-2xl font-bold mb-1">{campaign.name}</h1>
+              <h1 className="text-xl md:text-2xl font-bold tracking-tight mb-1">{campaign.name}</h1>
               <p className="text-gray-400 text-sm">{campaign.goalText}</p>
             </div>
-            <div className="flex items-center gap-2">
-              <span className={`text-xs px-3 py-1 rounded-full font-medium ${
-                campaign.status === 'launched' ? 'bg-green-900 text-green-300' :
-                campaign.status === 'ready' ? 'bg-yellow-900 text-yellow-300' :
-                'bg-gray-800 text-gray-400'
-              }`}>
-                {campaign.status}
-              </span>
-              <span className="text-xs bg-gray-800 text-gray-400 px-3 py-1 rounded-full">
-                {campaign.channel}
-              </span>
+            <div className="flex items-center gap-2 flex-shrink-0">
+              <span className={`text-xs px-3 py-1 rounded-full font-medium border ${
+                campaign.status === 'launched'
+                  ? 'bg-green-500/10 text-green-400 border-green-500/20'
+                  : 'bg-amber-500/10 text-amber-400 border-amber-500/20'
+              }`}>{campaign.status}</span>
+              <span className="text-xs bg-violet-500/10 text-violet-400 border border-violet-500/20 px-3 py-1 rounded-full">{campaign.channel}</span>
             </div>
           </div>
 
           {campaign.aiReasoning && (
-            <div className="bg-gray-800 rounded-xl p-4 mb-4">
-              <div className="flex items-center gap-2 text-purple-400 text-xs font-medium uppercase tracking-wide mb-2">
+            <div className="bg-violet-500/5 border border-violet-500/15 rounded-xl p-4 mb-4">
+              <div className="flex items-center gap-2 text-violet-400 text-xs font-medium uppercase tracking-wider mb-2">
                 <Zap className="w-3 h-3" />
                 AI Reasoning
               </div>
-              <p className="text-sm text-gray-300">{campaign.aiReasoning}</p>
+              <p className="text-sm text-gray-300 leading-relaxed">{campaign.aiReasoning}</p>
             </div>
           )}
 
@@ -163,18 +254,12 @@ export default function CampaignPage() {
             <button
               onClick={launchCampaign}
               disabled={launching}
-              className="w-full bg-purple-600 hover:bg-purple-500 disabled:opacity-50 py-3 rounded-xl font-medium transition-colors flex items-center justify-center gap-2"
+              className="w-full bg-gradient-to-r from-violet-600 to-purple-600 hover:from-violet-500 hover:to-purple-500 disabled:opacity-50 py-3 rounded-xl font-medium transition-all flex items-center justify-center gap-2"
             >
               {launching ? (
-                <>
-                  <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                  Launching...
-                </>
+                <><div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />Launching...</>
               ) : (
-                <>
-                  <Zap className="w-4 h-4" />
-                  Launch Campaign ({campaign.memberCount} members)
-                </>
+                <><Zap className="w-4 h-4" />Launch Campaign ({campaign.memberCount} members)</>
               )}
             </button>
           )}
@@ -183,21 +268,21 @@ export default function CampaignPage() {
         {/* Live stats */}
         {launched && (
           <>
-            <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
-              <StatCard icon={<MessageSquare className="w-5 h-5" />} label="Sent" value={events.sent} total={campaign.memberCount} color="blue" />
-              <StatCard icon={<Users className="w-5 h-5" />} label="Delivered" value={events.delivered} total={campaign.memberCount} color="purple" rate={`${deliveryRate}%`} />
-              <StatCard icon={<BarChart3 className="w-5 h-5" />} label="Read" value={events.read} total={events.delivered} color="teal" rate={`${readRate}%`} />
-              <StatCard icon={<MousePointer className="w-5 h-5" />} label="Clicked" value={events.clicked} total={events.read} color="green" rate={`${clickRate}%`} />
-              <StatCard icon={<ShoppingBag className="w-5 h-5" />} label="Converted" value={events.order_placed} total={events.clicked} color="amber" />
-              <StatCard icon={<XCircle className="w-5 h-5" />} label="Failed" value={events.failed} total={campaign.memberCount} color="red" />
+            <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+              <StatCard icon={<MessageSquare className="w-4 h-4" />} label="Sent" value={events.sent} color="blue" />
+              <StatCard icon={<Users className="w-4 h-4" />} label="Delivered" value={events.delivered} rate={`${campaign.memberCount > 0 ? Math.round((events.delivered / campaign.memberCount) * 100) : 0}%`} color="violet" />
+              <StatCard icon={<BarChart3 className="w-4 h-4" />} label="Read" value={events.read} rate={`${events.delivered > 0 ? Math.round((events.read / events.delivered) * 100) : 0}%`} color="teal" />
+              <StatCard icon={<MousePointer className="w-4 h-4" />} label="Clicked" value={events.clicked} rate={`${events.read > 0 ? Math.round((events.clicked / events.read) * 100) : 0}%`} color="green" />
+              <StatCard icon={<ShoppingBag className="w-4 h-4" />} label="Converted" value={events.order_placed} color="amber" />
+              <StatCard icon={<XCircle className="w-4 h-4" />} label="Failed" value={events.failed} color="red" />
             </div>
 
             {/* Funnel */}
-            <div className="bg-gray-900 rounded-2xl p-6 border border-gray-800">
-              <h3 className="text-sm font-medium text-gray-400 uppercase tracking-wide mb-4">Delivery Funnel</h3>
+            <div className="bg-white/3 border border-white/8 rounded-2xl p-5">
+              <h3 className="text-sm font-medium text-gray-400 uppercase tracking-wider mb-5">Delivery Funnel</h3>
               <div className="space-y-3">
                 <FunnelBar label="Sent" value={events.sent} max={campaign.memberCount} color="bg-blue-500" />
-                <FunnelBar label="Delivered" value={events.delivered} max={campaign.memberCount} color="bg-purple-500" />
+                <FunnelBar label="Delivered" value={events.delivered} max={campaign.memberCount} color="bg-violet-500" />
                 <FunnelBar label="Read" value={events.read} max={campaign.memberCount} color="bg-teal-500" />
                 <FunnelBar label="Clicked" value={events.clicked} max={campaign.memberCount} color="bg-green-500" />
                 <FunnelBar label="Converted" value={events.order_placed} max={campaign.memberCount} color="bg-amber-500" />
@@ -206,12 +291,116 @@ export default function CampaignPage() {
 
             {/* AI Insight */}
             {insight && (
-              <div className="bg-purple-950 border border-purple-800 rounded-2xl p-6">
-                <div className="flex items-center gap-2 text-purple-400 text-xs font-medium uppercase tracking-wide mb-3">
-                  <Zap className="w-3.5 h-3.5" />
+              <div className="bg-gradient-to-br from-violet-500/10 to-purple-500/5 border border-violet-500/20 rounded-2xl p-5">
+                <div className="flex items-center gap-2 text-violet-400 text-xs font-medium uppercase tracking-wider mb-3">
+                  <TrendingUp className="w-3.5 h-3.5" />
                   AI Campaign Insight
                 </div>
                 <p className="text-gray-200 text-sm leading-relaxed">{insight}</p>
+              </div>
+            )}
+
+            {/* Follow-up options */}
+            {followUpOptions.length > 0 && (
+              <div className="space-y-3">
+                <div className="text-sm font-medium text-gray-400 uppercase tracking-wider">
+                  AI Recommended Follow-ups
+                </div>
+                {followUpOptions.map((option) => (
+                  <div
+                    key={option.type}
+                    className={`border rounded-2xl p-5 ${followUpColors[option.color] || 'border-white/8 bg-white/3'}`}
+                  >
+                    <div className="flex items-start justify-between gap-4">
+                      <div className="flex-1">
+                        <div className="font-semibold text-white mb-1">{option.title}</div>
+                        <div className="text-sm text-gray-400 leading-relaxed mb-3">{option.description}</div>
+                        <div className="flex flex-wrap gap-1">
+                          {option.customers.slice(0, 4).map((c: any) => (
+                            <span key={c.id} className="text-xs bg-white/5 text-gray-400 px-2 py-0.5 rounded-full">
+                              {c.name.split(' ')[0]} · {c.city}
+                            </span>
+                          ))}
+                          {option.customers.length > 4 && (
+                            <span className="text-xs text-gray-600 px-2 py-0.5">+{option.customers.length - 4} more</span>
+                          )}
+                        </div>
+                      </div>
+                      <button
+                        onClick={() => launchFollowUp(option)}
+                        disabled={launchingFollowUp === option.type}
+                        className={`flex-shrink-0 flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium transition-all disabled:opacity-50 ${followUpButtonColors[option.color] || 'bg-violet-600 hover:bg-violet-500'}`}
+                      >
+                        {launchingFollowUp === option.type ? (
+                          <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                        ) : (
+                          <Zap className="w-4 h-4" />
+                        )}
+                        Launch Follow-up
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* Per-customer messages */}
+            {members && members.length > 0 && (
+              <div className="bg-white/3 border border-white/8 rounded-2xl p-5">
+                <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
+                  <h3 className="text-sm font-medium text-gray-400 uppercase tracking-wider">
+                    Customer Messages ({members.length})
+                  </h3>
+                  <div className="flex gap-1 flex-wrap">
+                    {(['all', 'clicked', 'read', 'delivered', 'failed'] as const).map(tab => (
+                      <button
+                        key={tab}
+                        onClick={() => setActiveTab(tab)}
+                        className={`text-xs px-2.5 py-1 rounded-lg transition-all ${
+                          activeTab === tab
+                            ? 'bg-violet-600 text-white'
+                            : 'text-gray-500 hover:text-white hover:bg-white/5'
+                        }`}
+                      >
+                        {tab === 'all' ? `All (${members.length})` :
+                         tab === 'clicked' ? `Clicked (${events.clicked})` :
+                         tab === 'read' ? `Read (${events.read})` :
+                         tab === 'delivered' ? `Delivered (${events.delivered})` :
+                         `Failed (${events.failed})`}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="space-y-3 max-h-96 overflow-y-auto">
+                  {filteredMembers.map((m) => (
+                    <div key={m.id} className="bg-black/20 border border-white/5 rounded-xl p-4">
+                      <div className="flex items-center justify-between mb-2">
+                        <div className="flex items-center gap-2">
+                          <div className="w-7 h-7 bg-violet-500/15 border border-violet-500/20 rounded-full flex items-center justify-center text-xs font-medium text-violet-400 flex-shrink-0">
+                            {m.customer?.name?.split(' ').map((n: string) => n[0]).join('').slice(0, 2)}
+                          </div>
+                          <div>
+                            <div className="text-sm font-medium text-white">{m.customer?.name}</div>
+                            <div className="text-xs text-gray-500">{m.customer?.city} · Rs.{Math.round(m.customer?.totalSpend || 0).toLocaleString()}</div>
+                          </div>
+                        </div>
+                        <span className={`text-xs px-2.5 py-1 rounded-full border font-medium ${statusColor(m.status)}`}>
+                          {m.status}
+                        </span>
+                      </div>
+                      <div className="text-sm text-gray-300 leading-relaxed bg-black/20 px-3 py-2 rounded-lg mt-2">
+                        {m.personalizedMessage}
+                      </div>
+                    </div>
+                  ))}
+
+                  {filteredMembers.length === 0 && (
+                    <div className="text-center py-8 text-gray-600 text-sm">
+                      No customers in this category yet
+                    </div>
+                  )}
+                </div>
               </div>
             )}
           </>
@@ -221,23 +410,22 @@ export default function CampaignPage() {
   )
 }
 
-function StatCard({ icon, label, value, total, color, rate }: any) {
-  const colorMap: any = {
-    blue: 'text-blue-400 bg-blue-950 border-blue-800',
-    purple: 'text-purple-400 bg-purple-950 border-purple-800',
-    teal: 'text-teal-400 bg-teal-950 border-teal-800',
-    green: 'text-green-400 bg-green-950 border-green-800',
-    amber: 'text-amber-400 bg-amber-950 border-amber-800',
-    red: 'text-red-400 bg-red-950 border-red-800',
+function StatCard({ icon, label, value, color, rate }: any) {
+  const colors: any = {
+    blue: 'border-blue-500/20 bg-blue-500/5 text-blue-400',
+    violet: 'border-violet-500/20 bg-violet-500/5 text-violet-400',
+    teal: 'border-teal-500/20 bg-teal-500/5 text-teal-400',
+    green: 'border-green-500/20 bg-green-500/5 text-green-400',
+    amber: 'border-amber-500/20 bg-amber-500/5 text-amber-400',
+    red: 'border-red-500/20 bg-red-500/5 text-red-400',
   }
   return (
-    <div className={`border rounded-2xl p-4 ${colorMap[color]}`}>
-      <div className="flex items-center gap-2 mb-2 opacity-70 text-xs font-medium uppercase tracking-wide">
-        {icon}
-        {label}
+    <div className={`border rounded-2xl p-4 ${colors[color]}`}>
+      <div className="flex items-center gap-2 mb-3 opacity-60 text-xs font-medium uppercase tracking-wider">
+        {icon}{label}
       </div>
-      <div className="text-3xl font-bold">{value}</div>
-      {rate && <div className="text-xs opacity-60 mt-1">{rate} rate</div>}
+      <div className="text-3xl font-bold text-white">{value}</div>
+      {rate && <div className="text-xs opacity-50 mt-1">{rate} rate</div>}
     </div>
   )
 }
@@ -245,15 +433,12 @@ function StatCard({ icon, label, value, total, color, rate }: any) {
 function FunnelBar({ label, value, max, color }: any) {
   const pct = max > 0 ? (value / max) * 100 : 0
   return (
-    <div className="flex items-center gap-3">
-      <div className="w-20 text-xs text-gray-400 text-right">{label}</div>
-      <div className="flex-1 bg-gray-800 rounded-full h-2">
-        <div
-          className={`h-2 rounded-full transition-all duration-500 ${color}`}
-          style={{ width: `${pct}%` }}
-        />
+    <div className="flex items-center gap-4">
+      <div className="w-20 text-xs text-gray-500 text-right">{label}</div>
+      <div className="flex-1 bg-white/5 rounded-full h-1.5">
+        <div className={`h-1.5 rounded-full transition-all duration-700 ${color}`} style={{ width: `${pct}%` }} />
       </div>
-      <div className="w-12 text-xs text-gray-400">{value} <span className="text-gray-600">({Math.round(pct)}%)</span></div>
+      <div className="w-20 text-xs text-gray-500 font-mono">{value} <span className="text-gray-700">({Math.round(pct)}%)</span></div>
     </div>
   )
 }
