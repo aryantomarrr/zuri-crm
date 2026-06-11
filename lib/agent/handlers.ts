@@ -281,7 +281,7 @@ Channel: ${channel}
 Write ONE personalized message for EACH customer below. Use their real purchase history to make it genuinely personal — mention their last product or favorite category. Keep under 280 chars. Warm, friendly tone. No generic "we missed you" — be specific to their purchases.
 
 Customers:
-${customerProfiles.map((c, idx) => `${idx + 1}. ${c.name} (${c.city})
+${customerProfiles.map((c: any, idx: number) => `${idx + 1}. ${c.name} (${c.city})
    - Last bought: ${c.lastProduct || 'unknown'} (${c.lastCategory || 'unknown category'})
    - Favorite categories: ${c.favoriteCategories.join(', ') || 'unknown'}
    - Days since last order: ${c.daysSinceLastOrder}

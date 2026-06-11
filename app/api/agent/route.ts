@@ -32,7 +32,6 @@ export async function POST(req: NextRequest) {
           return
         }
 
-        // Handle approval directly — no AI needed, use state from frontend
         if (isApproval) {
           try {
             if (!segmentId) {
@@ -52,7 +51,6 @@ export async function POST(req: NextRequest) {
               return
             }
 
-            // Fetch customers with full data for personalization
             const customers = await prisma.$queryRawUnsafe(
               `SELECT id, name, city, "totalSpend", "lastOrderAt", "orderCount"
                FROM "Customer" WHERE ${segment.sqlWhere} LIMIT 100`
@@ -65,7 +63,6 @@ export async function POST(req: NextRequest) {
               return
             }
 
-            // Generate personalized messages using real purchase history
             const messagesResult = await handleToolCall('draft_messages', {
               campaign_goal: goalText || 'Marketing campaign',
               channel: channel || 'WhatsApp',
@@ -77,7 +74,7 @@ export async function POST(req: NextRequest) {
                 lastOrderAt: c.lastOrderAt,
                 orderCount: c.orderCount,
               }))
-            })
+            }) as any
 
             const campaignMessages = messagesResult.messages?.length > 0
               ? messagesResult.messages
@@ -87,7 +84,6 @@ export async function POST(req: NextRequest) {
                   message: `Hi ${c.name.split(' ')[0]}! ${goalText} Shop at zuri.in`
                 }))
 
-            // Create the campaign
             const result = await handleToolCall('create_campaign', {
               name: (goalText || 'Campaign').slice(0, 60),
               goal_text: goalText || 'Marketing campaign',
@@ -95,7 +91,7 @@ export async function POST(req: NextRequest) {
               channel: channel || 'WhatsApp',
               messages: campaignMessages,
               ai_reasoning: `${channel || 'WhatsApp'} selected for ${customers.length} customers in "${segment.name}". Messages personalized using real purchase history.`
-            })
+            }) as any
 
             send({ type: 'tool_result', tool: 'create_campaign', result })
 
@@ -113,7 +109,6 @@ export async function POST(req: NextRequest) {
           return
         }
 
-        // Normal flow — run all tools via agentic loop
         let currentMessages: any[] = [{
           role: 'user',
           content: lastUserContent
